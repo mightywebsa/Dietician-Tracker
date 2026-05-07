@@ -1,12 +1,17 @@
 <?php
-/**
- * Plugin Name: Dietician Progress Tracker
- * Description: Allows users to log and track their weight loss progress with multiple metrics. Includes form + multi-line chart display.
- * Version: 1.3.1
- * Author: Mightyweb Pty Ltd
- */
+/*
+Plugin Name: Dietician Progress Tracker
+Description: Allows users to log and track their weight loss progress with multiple metrics. Includes form + multi-line chart display.
+Author: Mightyweb Pty Ltd
+Version: 1.3.2
+License: GPL-3.0+
+Text Domain: dietician-progress-tracker
+*/
 
-if ( ! defined( 'ABSPATH' ) ) exit;
+// Prevent direct access
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
 
 //  Create DB Table on Activation
 register_activation_hook( __FILE__, 'dpt_create_table' );
