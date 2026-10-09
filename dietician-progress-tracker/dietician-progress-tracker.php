@@ -3,7 +3,7 @@
 Plugin Name: Dietician Progress Tracker
 Description: Allows users to log and track their weight loss progress with multiple metrics. Includes form + multi-line chart display.
 Author: Mightyweb Pty Ltd
-Version: 1.3.2
+Version: 1.3.3
 License: GPL-3.0+
 Text Domain: dietician-progress-tracker
 */
