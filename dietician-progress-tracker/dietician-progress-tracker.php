@@ -165,7 +165,7 @@ function get_current_mealplan() {
     }
 
     $user_id = get_current_user_id();
-    $plan_id = get_user_meta($user_id, 'meal_plan_id', true);
+    $plan_id = get_user_meta($user_id, 'meal_plan', true);
 
     if ( ! $plan_id ) {
         return '<p>No meal plan assigned yet.</p>';
@@ -455,6 +455,35 @@ function dpt_admin_progress_single() {
         return;
     }
 
+        if (isset($_POST['update_meal_plan'])) {
+        if (!current_user_can('manage_options')) {
+            wp_die('You are not allowed to assign meal plans.');
+        }
+
+        check_admin_referer('dpt_update_meal_plan_' . $user_id, 'dpt_meal_plan_nonce');
+
+        $new_meal_plan = isset($_POST['new_meal_plan'])
+            ? absint(wp_unslash($_POST['new_meal_plan']))
+            : 0;
+
+        $plan = get_post($new_meal_plan);
+        if (!$plan || $plan->post_type !== 'meal_plan' || $plan->post_status !== 'publish') {
+            wp_die('Please select a published meal plan.');
+        }
+
+        update_user_meta($user_id, 'meal_plan', $new_meal_plan);
+
+        wp_safe_redirect(add_query_arg(
+            [
+                'page' => 'dpt-user-progress',
+                'user_id' => $user_id,
+                'meal_plan_updated' => '1',
+            ],
+            admin_url('admin.php')
+        ));
+        exit;
+    }
+
     $user = get_userdata($user_id);
     echo '<div class="wrap"><h1>Progress for ' . esc_html($user->display_name) . '</h1>';
 
@@ -600,6 +629,7 @@ $plans = get_posts([
 </p>
 
 <form method="post">
+    <?php wp_nonce_field('dpt_update_meal_plan_' . $user_id, 'dpt_meal_plan_nonce'); ?>
     <select name="new_meal_plan" style="width:300px;">
         <option value="">-- Select Meal Plan --</option>
         <?php foreach ($plans as $plan) : ?>
@@ -613,9 +643,8 @@ $plans = get_posts([
 
 
 <?php
-if (isset($_POST['update_meal_plan'])) {
-    $new_meal_plan = intval($_POST['new_meal_plan']);
-    update_user_meta($user_id, 'meal_plan', $new_meal_plan);
+if (isset($_GET['meal_plan_updated'])
+    && '1' === sanitize_text_field(wp_unslash($_GET['meal_plan_updated']))) {
     echo '<div class="updated"><p>Meal plan updated successfully.</p></div>';
 }
 ?>
@@ -712,7 +741,7 @@ function dpt_register_mealplan_cpt() {
 
 function dpt_admin_assign_mealplans() {
     if ( isset($_POST['assign_mealplan']) ) {
-        update_user_meta( intval($_POST['user_id']), 'meal_plan_id', intval($_POST['meal_plan_id']) );
+        update_user_meta( intval($_POST['user_id']), 'meal_plan', intval($_POST['meal_plan_id']) );
         echo '<div class="updated"><p>Meal plan assigned!</p></div>';
     }
 
