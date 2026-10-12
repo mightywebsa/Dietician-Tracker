@@ -3,7 +3,7 @@
 Plugin Name: Dietician Progress Tracker
 Description: Allows users to log and track their weight loss progress with multiple metrics. Includes form + multi-line chart display.
 Author: Mightyweb Pty Ltd
-Version: 1.3.3
+Version: 1.3.4
 License: GPL-3.0+
 Text Domain: dietician-progress-tracker
 */
@@ -80,14 +80,10 @@ function dpt_progress_form() {
         // Get form data
         $weight = floatval($_POST['weight']);
         $height_cm = isset($_POST['height_cm']) ? floatval($_POST['height_cm']) : 0;
-        $bmi = isset($_POST['bmi']) ? floatval($_POST['bmi']) : 0;
+        $posted_bmi = isset($_POST['bmi']) ? wp_unslash($_POST['bmi']) : '';
+        // Server-side fallback must be the value that is stored. The client field is often blank.
+        $bmi = dpt_resolve_logged_bmi($posted_bmi, $weight, $height_cm);
 
-        // ✅ Server-side BMI calculation (fallback)
-        if (empty($bmi) && $height_cm > 0 && $weight > 0) {
-            $height_m = $height_cm / 100;
-            $bmi = $weight / ($height_m * $height_m);
-        }
-        
         error_log("Calculated BMI: $bmi for weight $weight and height $height_cm");
 
         
@@ -103,7 +99,7 @@ function dpt_progress_form() {
             'left_thigh_cm' => floatval($_POST['left_thigh_cm']),
             'right_thigh_cm'=> floatval($_POST['right_thigh_cm']),
             'body_fat'      => floatval($_POST['body_fat']),
-            'bmi'           => floatval($_POST['bmi']),
+            'bmi'           => $bmi,
             'notes'         => sanitize_textarea_field($_POST['notes'])
         ] );
         $output .= '<p style="color:green;">Progress saved!</p>';
@@ -157,6 +153,105 @@ function dpt_progress_form() {
     return $output;
 }
 
+/**
+ * BMI stored for a progress entry.
+ * An empty client value is calculated from weight and height; an explicit value is kept.
+ */
+function dpt_resolve_logged_bmi($posted_bmi, $weight, $height_cm) {
+    if (is_array($posted_bmi)) {
+        $posted_bmi = 0;
+    }
+
+    $bmi = (float) $posted_bmi;
+    $weight = (float) $weight;
+    $height_cm = (float) $height_cm;
+
+    if (empty($bmi) && $height_cm > 0 && $weight > 0) {
+        $height_m = $height_cm / 100;
+        $bmi = $weight / ($height_m * $height_m);
+    }
+
+    return $bmi;
+}
+
+/**
+ * Choose the meal plan id to display.
+ * `meal_plan` is canonical. `meal_plan_id` is the legacy key written by Assign Meal Plan before 1.3.3.
+ * Returns id plus whether the legacy id should be copied onto the canonical key.
+ */
+function dpt_resolve_meal_plan_id($primary_meta, $legacy_meta, $legacy_post_type) {
+    $primary = absint($primary_meta);
+    if ($primary) {
+        return array(
+            'id' => $primary,
+            'migrate' => false,
+        );
+    }
+
+    $legacy = absint($legacy_meta);
+    if ($legacy && $legacy_post_type === 'meal_plan') {
+        return array(
+            'id' => $legacy,
+            'migrate' => true,
+        );
+    }
+
+    return array(
+        'id' => 0,
+        'migrate' => false,
+    );
+}
+
+function dpt_can_assign_meal_plan($plan_id, $post_type, $post_status) {
+    if (absint($plan_id) <= 0) {
+        return false;
+    }
+
+    return $post_type === 'meal_plan' && $post_status === 'publish';
+}
+
+function dpt_meal_plan_is_assignable($plan_id) {
+    $plan_id = absint($plan_id);
+    if (!$plan_id) {
+        return false;
+    }
+
+    $plan = get_post($plan_id);
+    $post_type = ($plan && isset($plan->post_type)) ? $plan->post_type : '';
+    $post_status = ($plan && isset($plan->post_status)) ? $plan->post_status : '';
+
+    return dpt_can_assign_meal_plan($plan_id, $post_type, $post_status);
+}
+
+function dpt_get_user_meal_plan_id($user_id) {
+    $user_id = absint($user_id);
+    if (!$user_id) {
+        return 0;
+    }
+
+    $primary = get_user_meta($user_id, 'meal_plan', true);
+    $legacy = '';
+    $legacy_type = '';
+
+    if (!absint($primary)) {
+        $legacy = get_user_meta($user_id, 'meal_plan_id', true);
+        $legacy_id = absint($legacy);
+        if ($legacy_id) {
+            $legacy_post = get_post($legacy_id);
+            if ($legacy_post && isset($legacy_post->post_type)) {
+                $legacy_type = $legacy_post->post_type;
+            }
+        }
+    }
+
+    $resolved = dpt_resolve_meal_plan_id($primary, $legacy, $legacy_type);
+    if (!empty($resolved['migrate'])) {
+        update_user_meta($user_id, 'meal_plan', $resolved['id']);
+    }
+
+    return (int) $resolved['id'];
+}
+
 // Shortcode: Display current meal plan
 add_shortcode('current_meal_plan', 'get_current_mealplan');
 function get_current_mealplan() {
@@ -165,7 +260,7 @@ function get_current_mealplan() {
     }
 
     $user_id = get_current_user_id();
-    $plan_id = get_user_meta($user_id, 'meal_plan', true);
+    $plan_id = dpt_get_user_meal_plan_id($user_id);
 
     if ( ! $plan_id ) {
         return '<p>No meal plan assigned yet.</p>';
@@ -361,13 +456,37 @@ function dpt_admin_progress_all() {
     $progress_table = $wpdb->prefix . 'user_progress';
     $users = get_users();
 
-    // ðŸ”¹ Handle bulk update
-    if (isset($_POST['bulk_meal_plan']) && !empty($_POST['selected_users'])) {
-        $new_meal_plan = intval($_POST['bulk_meal_plan']);
-        foreach ($_POST['selected_users'] as $user_id) {
-            update_user_meta($user_id, 'meal_plan', $new_meal_plan);
+    // Handle bulk update. A blank dropdown posts an empty value; never store that over existing assignments.
+    if (isset($_POST['dpt_bulk_assign_meal_plan'])) {
+        if (!current_user_can('manage_options')) {
+            wp_die('You are not allowed to assign meal plans.');
         }
-        echo '<div class="updated"><p>Meal plan assigned to selected users.</p></div>';
+
+        check_admin_referer('dpt_bulk_assign_meal_plan', 'dpt_bulk_meal_plan_nonce');
+
+        $new_meal_plan = isset($_POST['bulk_meal_plan']) ? absint(wp_unslash($_POST['bulk_meal_plan'])) : 0;
+        $selected_users = (isset($_POST['selected_users']) && is_array($_POST['selected_users'])) ? $_POST['selected_users'] : array();
+
+        if (!dpt_meal_plan_is_assignable($new_meal_plan)) {
+            echo '<div class="error"><p>Please select a published meal plan. No assignments were changed.</p></div>';
+        } elseif (!$selected_users) {
+            echo '<div class="error"><p>Select at least one user. No assignments were changed.</p></div>';
+        } else {
+            $updated = 0;
+            foreach ($selected_users as $selected_user_id) {
+                $selected_user_id = absint($selected_user_id);
+                if (!$selected_user_id || !get_userdata($selected_user_id)) {
+                    continue;
+                }
+                update_user_meta($selected_user_id, 'meal_plan', $new_meal_plan);
+                $updated++;
+            }
+            if ($updated) {
+                echo '<div class="updated"><p>Meal plan assigned to selected users.</p></div>';
+            } else {
+                echo '<div class="error"><p>No matching users were updated.</p></div>';
+            }
+        }
     }
 
     // ðŸ”¹ Get available meal plans
@@ -381,6 +500,7 @@ function dpt_admin_progress_all() {
 
     // Bulk action form
     echo '<form method="post">';
+    wp_nonce_field('dpt_bulk_assign_meal_plan', 'dpt_bulk_meal_plan_nonce');
     echo '<div style="margin-bottom:10px;">';
     echo '<select name="bulk_meal_plan">';
     echo '<option value="">-- Select Meal Plan --</option>';
@@ -388,7 +508,7 @@ function dpt_admin_progress_all() {
         echo '<option value="' . esc_attr($plan->ID) . '">' . esc_html($plan->post_title) . '</option>';
     }
     echo '</select> ';
-    echo '<input type="submit" class="button button-primary" value="Assign to Selected Users">';
+    echo '<input type="submit" name="dpt_bulk_assign_meal_plan" class="button button-primary" value="Assign to Selected Users">';
     echo '</div>';
 
     // Table
@@ -403,8 +523,8 @@ function dpt_admin_progress_all() {
     foreach ($users as $user) {
         $user_id = $user->ID;
 
-        // Current meal plan
-        $meal_plan_id = get_user_meta($user_id, 'meal_plan', true);
+        // Current meal plan (includes assignments stored on the legacy meta key)
+        $meal_plan_id = dpt_get_user_meal_plan_id($user_id);
         $meal_plan_title = '';
         if ($meal_plan_id) {
             $plan_post = get_post($meal_plan_id);
@@ -466,8 +586,7 @@ function dpt_admin_progress_single() {
             ? absint(wp_unslash($_POST['new_meal_plan']))
             : 0;
 
-        $plan = get_post($new_meal_plan);
-        if (!$plan || $plan->post_type !== 'meal_plan' || $plan->post_status !== 'publish') {
+        if (!dpt_meal_plan_is_assignable($new_meal_plan)) {
             wp_die('Please select a published meal plan.');
         }
 
@@ -602,11 +721,10 @@ function dpt_admin_progress_single() {
 
 <?php
 //  Current Meal Plan + Change Option
-$current_meal_plan = get_user_meta($user_id, 'meal_plan', true);
 ?>
 <h2>Meal Plan</h2>
 <?php
-$current_meal_plan = get_user_meta($user_id, 'meal_plan', true);
+$current_meal_plan = dpt_get_user_meal_plan_id($user_id);
 
 // Get published meal plans
 $plans = get_posts([
@@ -741,8 +859,21 @@ function dpt_register_mealplan_cpt() {
 
 function dpt_admin_assign_mealplans() {
     if ( isset($_POST['assign_mealplan']) ) {
-        update_user_meta( intval($_POST['user_id']), 'meal_plan', intval($_POST['meal_plan_id']) );
-        echo '<div class="updated"><p>Meal plan assigned!</p></div>';
+        if (!current_user_can('manage_options')) {
+            wp_die('You are not allowed to assign meal plans.');
+        }
+
+        check_admin_referer('dpt_assign_mealplan', 'dpt_assign_mealplan_nonce');
+
+        $assign_user_id = isset($_POST['user_id']) ? absint(wp_unslash($_POST['user_id'])) : 0;
+        $new_meal_plan = isset($_POST['meal_plan_id']) ? absint(wp_unslash($_POST['meal_plan_id'])) : 0;
+
+        if (!$assign_user_id || !get_userdata($assign_user_id) || !dpt_meal_plan_is_assignable($new_meal_plan)) {
+            echo '<div class="error"><p>Please select a user and a published meal plan. No assignment was changed.</p></div>';
+        } else {
+            update_user_meta($assign_user_id, 'meal_plan', $new_meal_plan);
+            echo '<div class="updated"><p>Meal plan assigned!</p></div>';
+        }
     }
 
     $users = get_users(['role__in' => ['subscriber', 'pmpro_member', 'administrator']]);
@@ -750,6 +881,7 @@ function dpt_admin_assign_mealplans() {
 
     echo '<div class="wrap"><h1>Assign Meal Plans</h1>';
     echo '<form method="post">';
+    wp_nonce_field('dpt_assign_mealplan', 'dpt_assign_mealplan_nonce');
     
     echo '<label>User:</label><br>';
     echo '<select name="user_id">';
