@@ -3,7 +3,7 @@
 Plugin Name: Dietician Progress Tracker
 Description: Allows users to log and track their weight loss progress with multiple metrics. Includes form + multi-line chart display.
 Author: Mightyweb Pty Ltd
-Version: 1.3.3
+Version: 1.3.4
 License: GPL-3.0+
 Text Domain: dietician-progress-tracker
 */
@@ -74,51 +74,45 @@ function dpt_progress_form() {
 
     $output = '';
     if ( isset($_POST['dpt_submit']) ) {
-        global $wpdb;
-        $table = $wpdb->prefix . 'user_progress';
-        
-        // Get form data
-        $weight = floatval($_POST['weight']);
-        $height_cm = isset($_POST['height_cm']) ? floatval($_POST['height_cm']) : 0;
-        $bmi = isset($_POST['bmi']) ? floatval($_POST['bmi']) : 0;
+        $progress_nonce = $_POST['dpt_progress_nonce'] ?? '';
+        if ( ! is_string( $progress_nonce ) || ! wp_verify_nonce( wp_unslash( $progress_nonce ), 'dpt_save_progress' ) ) {
+            $output .= '<p style="color:red;">Your session expired. Please reload the page and try again.</p>';
+        } else {
+            global $wpdb;
+            $table = $wpdb->prefix . 'user_progress';
 
-        // ✅ Server-side BMI calculation (fallback)
-        if (empty($bmi) && $height_cm > 0 && $weight > 0) {
-            $height_m = $height_cm / 100;
-            $bmi = $weight / ($height_m * $height_m);
+            $wpdb->insert( $table, [
+                'user_id'       => get_current_user_id(),
+                'date_logged'   => current_time('mysql'),
+                'weight'        => dpt_posted_float( 'weight' ),
+                'waist'         => dpt_posted_float( 'waist' ),
+                'hip_cm'        => dpt_posted_float( 'hip_cm' ),
+                'chest_cm'      => dpt_posted_float( 'chest_cm' ),
+                'left_bicep_cm' => dpt_posted_float( 'left_bicep_cm' ),
+                'right_bicep_cm'=> dpt_posted_float( 'right_bicep_cm' ),
+                'left_thigh_cm' => dpt_posted_float( 'left_thigh_cm' ),
+                'right_thigh_cm'=> dpt_posted_float( 'right_thigh_cm' ),
+                'body_fat'      => dpt_posted_float( 'body_fat' ),
+                'bmi'           => dpt_posted_float( 'bmi' ),
+                'notes'         => dpt_posted_textarea( 'notes' ),
+            ] );
+            $output .= '<p style="color:green;">Progress saved!</p>';
         }
-        
-        error_log("Calculated BMI: $bmi for weight $weight and height $height_cm");
-
-        
-        $wpdb->insert( $table, [
-            'user_id'       => get_current_user_id(),
-            'date_logged'   => current_time('mysql'),
-            'weight'        => floatval($_POST['weight']),
-            'waist'         => floatval($_POST['waist']),
-            'hip_cm'        => floatval($_POST['hip_cm']),
-            'chest_cm'      => floatval($_POST['chest_cm']),
-            'left_bicep_cm' => floatval($_POST['left_bicep_cm']),
-            'right_bicep_cm'=> floatval($_POST['right_bicep_cm']),
-            'left_thigh_cm' => floatval($_POST['left_thigh_cm']),
-            'right_thigh_cm'=> floatval($_POST['right_thigh_cm']),
-            'body_fat'      => floatval($_POST['body_fat']),
-            'bmi'           => floatval($_POST['bmi']),
-            'notes'         => sanitize_textarea_field($_POST['notes'])
-        ] );
-        $output .= '<p style="color:green;">Progress saved!</p>';
     }
     
     $user_id = get_current_user_id();
     $height_cm = get_user_meta($user_id, 'height', true);
+    if ( ! is_scalar( $height_cm ) ) {
+        $height_cm = '';
+    }
     
     $output .= '
 
     <form method="post">
+        ' . wp_nonce_field( 'dpt_save_progress', 'dpt_progress_nonce', true, false ) . '
         <label>Weight (kg):</label><br>
         <input type="number" step="0.01" name="weight" id="weight" required><br><br>
-        <input type="number" id="height_cm" name="height_cm" value='.
-            esc_attr($height_cm).' readonly hidden>
+        <input type="number" id="height_cm" name="height_cm" value="' . esc_attr( $height_cm ) . '" readonly hidden>
     
         <label>Waist (cm):</label><br>
         <input type="number" step="0.01" name="waist"><br><br>
@@ -172,11 +166,11 @@ function get_current_mealplan() {
     }
 
     $plan = get_post($plan_id);
-    if ( ! $plan || $plan->post_type !== 'meal_plan' ) {
+    if ( ! $plan || $plan->post_type !== 'meal_plan' || $plan->post_status !== 'publish' ) {
         return '<p>Meal plan not found.</p>';
     }
 
-    return '<div class="meal-plan"><h3>' . esc_html($plan->post_title) . '</h3><div>' . wpautop($plan->post_content) . '</div></div>';
+    return '<div class="meal-plan"><h3>' . esc_html($plan->post_title) . '</h3><div>' . wp_kses_post( wpautop( $plan->post_content ) ) . '</div></div>';
 }
 
 
@@ -273,7 +267,7 @@ function dpt_progress_chart() {
 
     ob_start();
     ?>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js" integrity="sha384-Sse/HDqcypGpyTDpvZOJNnG0TT3feGQUkF9H+mnRvic+LjR+K1NhTt8f51KIQ3v3" crossorigin="anonymous"></script>
     <?php foreach ( $charts as $key => $chart ) : 
         $chart_id = "dptChart_{$key}_{$uid}";
     ?>
@@ -348,6 +342,49 @@ function dpt_admin_menu() {
 }
 
 
+/**
+ * Published meal plan ID, or 0 when the value cannot be assigned.
+ */
+function dpt_get_valid_meal_plan_id( $plan_id ) {
+    if ( is_array( $plan_id ) ) {
+        return 0;
+    }
+
+    $plan_id = absint( $plan_id );
+    if ( ! $plan_id ) {
+        return 0;
+    }
+
+    $plan = get_post( $plan_id );
+    if ( ! $plan || $plan->post_type !== 'meal_plan' || $plan->post_status !== 'publish' ) {
+        return 0;
+    }
+
+    return $plan_id;
+}
+
+/**
+ * Numeric value from the current request, or 0 when the field is missing or not scalar.
+ */
+function dpt_posted_float( $key ) {
+    if ( ! isset( $_POST[ $key ] ) || ! is_scalar( $_POST[ $key ] ) ) {
+        return 0.0;
+    }
+
+    return (float) wp_unslash( $_POST[ $key ] );
+}
+
+/**
+ * Textarea value from the current request.
+ */
+function dpt_posted_textarea( $key ) {
+    if ( ! isset( $_POST[ $key ] ) || ! is_string( $_POST[ $key ] ) ) {
+        return '';
+    }
+
+    return sanitize_textarea_field( wp_unslash( $_POST[ $key ] ) );
+}
+
 function dpt_admin_dashboard() {
     echo '<div class="wrap"><h1>Dietician Progress Tracker</h1>';
     echo '<p>Welcome! Use the menu to view user progress or manage meal plans.</p>';
@@ -355,19 +392,35 @@ function dpt_admin_dashboard() {
 }
 
 function dpt_admin_progress_all() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'You are not allowed to view user progress.' );
+    }
+
     echo '<div class="wrap"><h1>All User Progress</h1>';
 
     global $wpdb;
     $progress_table = $wpdb->prefix . 'user_progress';
     $users = get_users();
 
-    // ðŸ”¹ Handle bulk update
-    if (isset($_POST['bulk_meal_plan']) && !empty($_POST['selected_users'])) {
-        $new_meal_plan = intval($_POST['bulk_meal_plan']);
-        foreach ($_POST['selected_users'] as $user_id) {
-            update_user_meta($user_id, 'meal_plan', $new_meal_plan);
+    if ( isset( $_POST['dpt_bulk_assign'] ) ) {
+        check_admin_referer( 'dpt_bulk_assign_meal_plan', 'dpt_bulk_nonce' );
+
+        $new_meal_plan = dpt_get_valid_meal_plan_id( wp_unslash( $_POST['bulk_meal_plan'] ?? 0 ) );
+        $selected_users = $_POST['selected_users'] ?? [];
+
+        if ( ! $new_meal_plan ) {
+            echo '<div class="error"><p>Please select a published meal plan.</p></div>';
+        } elseif ( ! is_array( $selected_users ) || empty( $selected_users ) ) {
+            echo '<div class="error"><p>Please select at least one user.</p></div>';
+        } else {
+            foreach ( $selected_users as $selected_user_id ) {
+                $selected_user_id = absint( $selected_user_id );
+                if ( $selected_user_id && get_userdata( $selected_user_id ) ) {
+                    update_user_meta( $selected_user_id, 'meal_plan', $new_meal_plan );
+                }
+            }
+            echo '<div class="updated"><p>Meal plan assigned to selected users.</p></div>';
         }
-        echo '<div class="updated"><p>Meal plan assigned to selected users.</p></div>';
     }
 
     // ðŸ”¹ Get available meal plans
@@ -381,6 +434,7 @@ function dpt_admin_progress_all() {
 
     // Bulk action form
     echo '<form method="post">';
+    wp_nonce_field( 'dpt_bulk_assign_meal_plan', 'dpt_bulk_nonce' );
     echo '<div style="margin-bottom:10px;">';
     echo '<select name="bulk_meal_plan">';
     echo '<option value="">-- Select Meal Plan --</option>';
@@ -388,7 +442,7 @@ function dpt_admin_progress_all() {
         echo '<option value="' . esc_attr($plan->ID) . '">' . esc_html($plan->post_title) . '</option>';
     }
     echo '</select> ';
-    echo '<input type="submit" class="button button-primary" value="Assign to Selected Users">';
+    echo '<input type="submit" name="dpt_bulk_assign" class="button button-primary" value="Assign to Selected Users">';
     echo '</div>';
 
     // Table
@@ -446,89 +500,97 @@ function dpt_admin_progress_all() {
 
 
 function dpt_admin_progress_single() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'You are not allowed to view user progress.' );
+    }
+
     global $wpdb;
     $table = $wpdb->prefix . 'user_progress';
 
-    $user_id = intval($_GET['user_id'] ?? 0);
-    if (!$user_id) {
+    $user_id = ( isset( $_GET['user_id'] ) && is_scalar( $_GET['user_id'] ) ) ? absint( wp_unslash( $_GET['user_id'] ) ) : 0;
+    $user = $user_id ? get_userdata( $user_id ) : false;
+    if ( ! $user ) {
         echo '<p>No user selected.</p>';
         return;
     }
 
-        if (isset($_POST['update_meal_plan'])) {
-        if (!current_user_can('manage_options')) {
-            wp_die('You are not allowed to assign meal plans.');
+    if ( isset( $_POST['update_meal_plan'] ) ) {
+        check_admin_referer( 'dpt_update_meal_plan_' . $user_id, 'dpt_meal_plan_nonce' );
+
+        $new_meal_plan = dpt_get_valid_meal_plan_id( wp_unslash( $_POST['new_meal_plan'] ?? 0 ) );
+        if ( ! $new_meal_plan ) {
+            wp_die( 'Please select a published meal plan.' );
         }
 
-        check_admin_referer('dpt_update_meal_plan_' . $user_id, 'dpt_meal_plan_nonce');
+        update_user_meta( $user_id, 'meal_plan', $new_meal_plan );
 
-        $new_meal_plan = isset($_POST['new_meal_plan'])
-            ? absint(wp_unslash($_POST['new_meal_plan']))
-            : 0;
-
-        $plan = get_post($new_meal_plan);
-        if (!$plan || $plan->post_type !== 'meal_plan' || $plan->post_status !== 'publish') {
-            wp_die('Please select a published meal plan.');
-        }
-
-        update_user_meta($user_id, 'meal_plan', $new_meal_plan);
-
-        wp_safe_redirect(add_query_arg(
+        wp_safe_redirect( add_query_arg(
             [
                 'page' => 'dpt-user-progress',
                 'user_id' => $user_id,
                 'meal_plan_updated' => '1',
             ],
-            admin_url('admin.php')
-        ));
+            admin_url( 'admin.php' )
+        ) );
         exit;
     }
 
-    $user = get_userdata($user_id);
-    echo '<div class="wrap"><h1>Progress for ' . esc_html($user->display_name) . '</h1>';
+    echo '<div class="wrap"><h1>Progress for ' . esc_html( $user->display_name ) . '</h1>';
 
-    // âœ… Handle delete
-    if (isset($_GET['delete_entry'])) {
-        $entry_id = intval($_GET['delete_entry']);
-        $wpdb->delete($table, ['id' => $entry_id, 'user_id' => $user_id]);
-        echo '<div class="updated"><p>Entry deleted.</p></div>';
+    if ( isset( $_POST['delete_entry'] ) ) {
+        $entry_id = is_scalar( $_POST['delete_entry'] ) ? absint( wp_unslash( $_POST['delete_entry'] ) ) : 0;
+        check_admin_referer( 'dpt_delete_progress_' . $entry_id, 'dpt_delete_nonce' );
+        if ( $entry_id ) {
+            $wpdb->delete( $table, [ 'id' => $entry_id, 'user_id' => $user_id ] );
+            echo '<div class="updated"><p>Entry deleted.</p></div>';
+        }
     }
 
-    // âœ… Handle update
-    if (isset($_POST['update_progress'])) {
-        $wpdb->update($table, [
-            'weight'        => floatval($_POST['weight']),
-            'waist'         => floatval($_POST['waist']),
-            'hip_cm'        => floatval($_POST['hip_cm']),
-            'chest_cm'      => floatval($_POST['chest_cm']),
-            'left_bicep_cm' => floatval($_POST['left_bicep_cm']),
-            'right_bicep_cm'=> floatval($_POST['right_bicep_cm']),
-            'left_thigh_cm' => floatval($_POST['left_thigh_cm']),
-            'right_thigh_cm'=> floatval($_POST['right_thigh_cm']),
-            'body_fat'      => floatval($_POST['body_fat']),
-            'bmi'           => floatval($_POST['bmi']),            
-            'notes'         => sanitize_textarea_field($_POST['notes'])
-        ], ['id' => intval($_POST['entry_id']), 'user_id' => $user_id]);
+    if ( isset( $_POST['update_progress'] ) ) {
+        $entry_id = ( isset( $_POST['entry_id'] ) && is_scalar( $_POST['entry_id'] ) ) ? absint( wp_unslash( $_POST['entry_id'] ) ) : 0;
+        check_admin_referer( 'dpt_update_progress_' . $entry_id, 'dpt_update_nonce' );
+        $wpdb->update( $table, [
+            'weight'        => dpt_posted_float( 'weight' ),
+            'waist'         => dpt_posted_float( 'waist' ),
+            'hip_cm'        => dpt_posted_float( 'hip_cm' ),
+            'chest_cm'      => dpt_posted_float( 'chest_cm' ),
+            'left_bicep_cm' => dpt_posted_float( 'left_bicep_cm' ),
+            'right_bicep_cm'=> dpt_posted_float( 'right_bicep_cm' ),
+            'left_thigh_cm' => dpt_posted_float( 'left_thigh_cm' ),
+            'right_thigh_cm'=> dpt_posted_float( 'right_thigh_cm' ),
+            'body_fat'      => dpt_posted_float( 'body_fat' ),
+            'bmi'           => dpt_posted_float( 'bmi' ),
+            'notes'         => dpt_posted_textarea( 'notes' ),
+        ], [ 'id' => $entry_id, 'user_id' => $user_id ] );
         echo '<div class="updated"><p>Progress entry updated.</p></div>';
     }
 
-    // âœ… Handle add new entry
-    if (isset($_POST['add_progress'])) {
-        $wpdb->insert($table, [
+    if ( isset( $_POST['add_progress'] ) ) {
+        check_admin_referer( 'dpt_add_progress_' . $user_id, 'dpt_add_nonce' );
+
+        $logged_date = '';
+        if ( isset( $_POST['date_logged'] ) && is_string( $_POST['date_logged'] ) ) {
+            $logged_date = sanitize_text_field( wp_unslash( $_POST['date_logged'] ) );
+        }
+        $date_logged = preg_match( '/^\d{4}-\d{2}-\d{2}$/', $logged_date )
+            ? $logged_date . ' ' . date( 'H:i:s' )
+            : current_time( 'mysql' );
+
+        $wpdb->insert( $table, [
             'user_id'       => $user_id,
-            'date_logged'   => !empty($_POST['date_logged'])    ? sanitize_text_field($_POST['date_logged']) . ' ' . date('H:i:s')    : current_time('mysql'),
-            'weight'        => floatval($_POST['weight']),
-            'waist'         => floatval($_POST['waist']),
-            'hip_cm'        => floatval($_POST['hip_cm']),
-            'chest_cm'      => floatval($_POST['chest_cm']),
-            'left_bicep_cm' => floatval($_POST['left_bicep_cm']),
-            'right_bicep_cm'=> floatval($_POST['right_bicep_cm']),
-            'left_thigh_cm' => floatval($_POST['left_thigh_cm']),
-            'right_thigh_cm'=> floatval($_POST['right_thigh_cm']),
-            'body_fat'      => floatval($_POST['body_fat']),
-            'bmi'           => floatval($_POST['bmi']),            
-            'notes'         => sanitize_textarea_field($_POST['notes'])
-        ]);
+            'date_logged'   => $date_logged,
+            'weight'        => dpt_posted_float( 'weight' ),
+            'waist'         => dpt_posted_float( 'waist' ),
+            'hip_cm'        => dpt_posted_float( 'hip_cm' ),
+            'chest_cm'      => dpt_posted_float( 'chest_cm' ),
+            'left_bicep_cm' => dpt_posted_float( 'left_bicep_cm' ),
+            'right_bicep_cm'=> dpt_posted_float( 'right_bicep_cm' ),
+            'left_thigh_cm' => dpt_posted_float( 'left_thigh_cm' ),
+            'right_thigh_cm'=> dpt_posted_float( 'right_thigh_cm' ),
+            'body_fat'      => dpt_posted_float( 'body_fat' ),
+            'bmi'           => dpt_posted_float( 'bmi' ),
+            'notes'         => dpt_posted_textarea( 'notes' ),
+        ] );
         echo '<div class="updated"><p>New progress entry added.</p></div>';
     }
 
@@ -563,32 +625,39 @@ function dpt_admin_progress_single() {
                 <td>' . esc_html($row->bmi) . '</td>                
                 <td>' . esc_html($row->notes) . '</td>
                 <td>
-                    <a href="javascript:void(0);" class="button" onclick="toggleEditRow(' . $row->id . ')">Edit</a>
-                    <a href="' . admin_url('admin.php?page=dpt-user-progress&user_id=' . $user_id . '&delete_entry=' . $row->id) . '" class="button button-secondary" onclick="return confirm(\'Delete this entry?\')">Delete</a>
+                    <a href="javascript:void(0);" class="button" onclick="toggleEditRow(' . intval( $row->id ) . ')">Edit</a>
+                    <form method="post" style="display:inline;" onsubmit="return confirm(\'Delete this entry?\');">
+                        ' . wp_nonce_field( 'dpt_delete_progress_' . intval( $row->id ), 'dpt_delete_nonce', true, false ) . '
+                        <input type="hidden" name="delete_entry" value="' . intval( $row->id ) . '">
+                        <button type="submit" class="button button-secondary">Delete</button>
+                    </form>
                 </td>
             </tr>';
 
-            // Hidden edit row
-            echo '<tr id="row-edit-' . $row->id . '" style="display:none;background:#f9f9f9;">
-                <form method="post">
-                <td>' . esc_html($row->date_logged) . '</td>
-                <td><input type="number" step="0.01" name="weight" value="' . esc_attr($row->weight) . '" /></td>
-                <td><input type="number" step="0.01" name="waist" value="' . esc_attr($row->waist) . '" /></td>
-                <td><input type="number" step="0.01" name="hip_cm" value="' . esc_attr($row->hip_cm) . '" /></td>
-                <td><input type="number" step="0.01" name="chest_cm" value="' . esc_attr($row->chest_cm) . '" /></td>
-                <td><input type="number" step="0.01" name="left_bicep_cm" value="' . esc_attr($row->left_bicep_cm) . '" /></td>
-                <td><input type="number" step="0.01" name="right_bicep_cm" value="' . esc_attr($row->right_bicep_cm) . '" /></td>
-                <td><input type="number" step="0.01" name="left_thigh_cm" value="' . esc_attr($row->left_thigh_cm) . '" /></td>
-                <td><input type="number" step="0.01" name="right_thigh_cm" value="' . esc_attr($row->right_thigh_cm) . '" /></td>
-                <td><input type="number" step="0.01" name="body_fat" value="' . esc_attr($row->body_fat) . '" /></td>
-                <td><input type="number" step="0.01" name="bmi" value="' . esc_attr($row->bmi) . '" /></td>                
-                <td><textarea name="notes">' . esc_textarea($row->notes) . '</textarea></td>
+            // Edit fields live outside the form element because a form cannot wrap table cells.
+            // The form attribute keeps Save, the nonce, and the inputs in one submission.
+            $edit_form_id = 'dpt-edit-' . intval( $row->id );
+            echo '<tr id="row-edit-' . intval( $row->id ) . '" style="display:none;background:#f9f9f9;">
+                <td>' . esc_html( $row->date_logged ) . '</td>
+                <td><input form="' . esc_attr( $edit_form_id ) . '" type="number" step="0.01" name="weight" value="' . esc_attr( $row->weight ) . '" /></td>
+                <td><input form="' . esc_attr( $edit_form_id ) . '" type="number" step="0.01" name="waist" value="' . esc_attr( $row->waist ) . '" /></td>
+                <td><input form="' . esc_attr( $edit_form_id ) . '" type="number" step="0.01" name="hip_cm" value="' . esc_attr( $row->hip_cm ) . '" /></td>
+                <td><input form="' . esc_attr( $edit_form_id ) . '" type="number" step="0.01" name="chest_cm" value="' . esc_attr( $row->chest_cm ) . '" /></td>
+                <td><input form="' . esc_attr( $edit_form_id ) . '" type="number" step="0.01" name="left_bicep_cm" value="' . esc_attr( $row->left_bicep_cm ) . '" /></td>
+                <td><input form="' . esc_attr( $edit_form_id ) . '" type="number" step="0.01" name="right_bicep_cm" value="' . esc_attr( $row->right_bicep_cm ) . '" /></td>
+                <td><input form="' . esc_attr( $edit_form_id ) . '" type="number" step="0.01" name="left_thigh_cm" value="' . esc_attr( $row->left_thigh_cm ) . '" /></td>
+                <td><input form="' . esc_attr( $edit_form_id ) . '" type="number" step="0.01" name="right_thigh_cm" value="' . esc_attr( $row->right_thigh_cm ) . '" /></td>
+                <td><input form="' . esc_attr( $edit_form_id ) . '" type="number" step="0.01" name="body_fat" value="' . esc_attr( $row->body_fat ) . '" /></td>
+                <td><input form="' . esc_attr( $edit_form_id ) . '" type="number" step="0.01" name="bmi" value="' . esc_attr( $row->bmi ) . '" /></td>
+                <td><textarea form="' . esc_attr( $edit_form_id ) . '" name="notes">' . esc_textarea( $row->notes ) . '</textarea></td>
                 <td>
-                    <input type="hidden" name="entry_id" value="' . intval($row->id) . '">
+                    <form id="' . esc_attr( $edit_form_id ) . '" method="post">
+                    ' . wp_nonce_field( 'dpt_update_progress_' . intval( $row->id ), 'dpt_update_nonce', true, false ) . '
+                    <input type="hidden" name="entry_id" value="' . intval( $row->id ) . '">
                     <input type="submit" name="update_progress" class="button button-primary" value="Save">
-                    <a href="javascript:void(0);" class="button" onclick="toggleEditRow(' . $row->id . ')">Cancel</a>
+                    </form>
+                    <a href="javascript:void(0);" class="button" onclick="toggleEditRow(' . intval( $row->id ) . ')">Cancel</a>
                 </td>
-                </form>
             </tr>';
         }
 
@@ -651,15 +720,16 @@ if (isset($_GET['meal_plan_updated'])
 
 <?php     //Add new entry form below 
 
-if (isset($_GET['user_id'])) {
-    $user_id = intval($_GET['user_id']);
-    $height = get_user_meta($user_id, 'height', true);
-    }
+$height = get_user_meta( $user_id, 'height', true );
+if ( ! is_scalar( $height ) ) {
+    $height = '';
+}
 
 ?>
 
 <h2>Add New Progress Entry</h2>
 <form method="post">
+    <?php wp_nonce_field( 'dpt_add_progress_' . $user_id, 'dpt_add_nonce' ); ?>
     <table class="form-table">
         <tr>
             <th>Date</th>
@@ -668,7 +738,7 @@ if (isset($_GET['user_id'])) {
                 <p class="description">Select the date for this entry (defaults to today).</p>
             </td>
         </tr>
-        <tr><th>Height (cm)</th><td><input type="number" id="height_cm" name="height_cm" value= <?php echo $height ?> readonly></td></tr>
+        <tr><th>Height (cm)</th><td><input type="number" id="height_cm" name="height_cm" value="<?php echo esc_attr( $height ); ?>" readonly></td></tr>
         <tr><th>Weight (kg)</th><td><input type="number" step="0.1" name="weight" id="weight"></td></tr>
         <tr><th>Waist (cm)</th><td><input type="number" step="0.1" name="waist"></td></tr>
         <tr><th>Hip (cm)</th><td><input type="number" step="0.1" name="hip_cm"></td></tr>
@@ -740,16 +810,36 @@ function dpt_register_mealplan_cpt() {
 
 
 function dpt_admin_assign_mealplans() {
-    if ( isset($_POST['assign_mealplan']) ) {
-        update_user_meta( intval($_POST['user_id']), 'meal_plan', intval($_POST['meal_plan_id']) );
-        echo '<div class="updated"><p>Meal plan assigned!</p></div>';
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_die( 'You are not allowed to assign meal plans.' );
+    }
+
+    if ( isset( $_POST['assign_mealplan'] ) ) {
+        check_admin_referer( 'dpt_assign_mealplan', 'dpt_assign_nonce' );
+
+        $assign_user_id = ( isset( $_POST['user_id'] ) && is_scalar( $_POST['user_id'] ) ) ? absint( wp_unslash( $_POST['user_id'] ) ) : 0;
+        $plan_id = dpt_get_valid_meal_plan_id( wp_unslash( $_POST['meal_plan_id'] ?? 0 ) );
+
+        if ( ! $assign_user_id || ! get_userdata( $assign_user_id ) || ! $plan_id ) {
+            echo '<div class="error"><p>Please select a valid user and a published meal plan.</p></div>';
+        } else {
+            update_user_meta( $assign_user_id, 'meal_plan', $plan_id );
+            echo '<div class="updated"><p>Meal plan assigned!</p></div>';
+        }
     }
 
     $users = get_users(['role__in' => ['subscriber', 'pmpro_member', 'administrator']]);
-    $mealplans = get_posts(['post_type' => 'meal_plan', 'numberposts' => -1]);
+    $mealplans = get_posts([
+        'post_type'   => 'meal_plan',
+        'post_status' => 'publish',
+        'numberposts' => -1,
+        'orderby'     => 'title',
+        'order'       => 'ASC',
+    ]);
 
     echo '<div class="wrap"><h1>Assign Meal Plans</h1>';
     echo '<form method="post">';
+    wp_nonce_field( 'dpt_assign_mealplan', 'dpt_assign_nonce' );
     
     echo '<label>User:</label><br>';
     echo '<select name="user_id">';
