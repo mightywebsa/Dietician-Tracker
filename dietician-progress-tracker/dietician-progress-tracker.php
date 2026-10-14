@@ -3,7 +3,7 @@
 Plugin Name: Dietician Progress Tracker
 Description: Allows users to log and track their weight loss progress with multiple metrics. Includes form + multi-line chart display.
 Author: Mightyweb Pty Ltd
-Version: 1.3.4
+Version: 1.3.5
 License: GPL-3.0+
 Text Domain: dietician-progress-tracker
 */
@@ -81,6 +81,8 @@ function dpt_progress_form() {
             global $wpdb;
             $table = $wpdb->prefix . 'user_progress';
 
+            $posted_bmi = ( isset( $_POST['bmi'] ) && is_scalar( $_POST['bmi'] ) ) ? wp_unslash( $_POST['bmi'] ) : '';
+
             $wpdb->insert( $table, [
                 'user_id'       => get_current_user_id(),
                 'date_logged'   => current_time('mysql'),
@@ -93,7 +95,7 @@ function dpt_progress_form() {
                 'left_thigh_cm' => dpt_posted_float( 'left_thigh_cm' ),
                 'right_thigh_cm'=> dpt_posted_float( 'right_thigh_cm' ),
                 'body_fat'      => dpt_posted_float( 'body_fat' ),
-                'bmi'           => dpt_posted_float( 'bmi' ),
+                'bmi'           => dpt_resolve_logged_bmi( $posted_bmi, dpt_posted_float( 'weight' ), dpt_posted_float( 'height_cm' ) ),
                 'notes'         => dpt_posted_textarea( 'notes' ),
             ] );
             $output .= '<p style="color:green;">Progress saved!</p>';
@@ -159,7 +161,7 @@ function get_current_mealplan() {
     }
 
     $user_id = get_current_user_id();
-    $plan_id = get_user_meta($user_id, 'meal_plan', true);
+    $plan_id = dpt_get_user_meal_plan_id( $user_id );
 
     if ( ! $plan_id ) {
         return '<p>No meal plan assigned yet.</p>';
@@ -364,6 +366,65 @@ function dpt_get_valid_meal_plan_id( $plan_id ) {
 }
 
 /**
+ * BMI stored for a progress entry.
+ * An empty client value is calculated from weight and height; an explicit value is kept.
+ */
+function dpt_resolve_logged_bmi( $posted_bmi, $weight, $height_cm ) {
+    if ( is_array( $posted_bmi ) ) {
+        $posted_bmi = 0;
+    }
+
+    $bmi = (float) $posted_bmi;
+    $weight = (float) $weight;
+    $height_cm = (float) $height_cm;
+
+    if ( empty( $bmi ) && $height_cm > 0 && $weight > 0 ) {
+        $height_m = $height_cm / 100;
+        $bmi = $weight / ( $height_m * $height_m );
+    }
+
+    return $bmi;
+}
+
+/**
+ * Meal plan id to display.
+ * meal_plan is canonical. meal_plan_id is the legacy key written by Assign Meal Plan before 1.3.3.
+ * A published legacy plan is copied onto meal_plan.
+ */
+function dpt_get_user_meal_plan_id( $user_id ) {
+    $user_id = absint( $user_id );
+    if ( ! $user_id ) {
+        return 0;
+    }
+
+    $primary_meta = get_user_meta( $user_id, 'meal_plan', true );
+    if ( is_array( $primary_meta ) ) {
+        $primary_meta = 0;
+    }
+    $primary = absint( $primary_meta );
+    if ( $primary ) {
+        return $primary;
+    }
+
+    $legacy_meta = get_user_meta( $user_id, 'meal_plan_id', true );
+    if ( is_array( $legacy_meta ) ) {
+        $legacy_meta = 0;
+    }
+    $legacy = absint( $legacy_meta );
+    if ( ! $legacy ) {
+        return 0;
+    }
+
+    $legacy_post = get_post( $legacy );
+    if ( ! $legacy_post || $legacy_post->post_type !== 'meal_plan' || $legacy_post->post_status !== 'publish' ) {
+        return 0;
+    }
+
+    update_user_meta( $user_id, 'meal_plan', $legacy );
+    return $legacy;
+}
+
+/**
  * Numeric value from the current request, or 0 when the field is missing or not scalar.
  */
 function dpt_posted_float( $key ) {
@@ -457,8 +518,8 @@ function dpt_admin_progress_all() {
     foreach ($users as $user) {
         $user_id = $user->ID;
 
-        // Current meal plan
-        $meal_plan_id = get_user_meta($user_id, 'meal_plan', true);
+        // Current meal plan, including assignments stored on the legacy meta key.
+        $meal_plan_id = dpt_get_user_meal_plan_id( $user_id );
         $meal_plan_title = '';
         if ($meal_plan_id) {
             $plan_post = get_post($meal_plan_id);
@@ -669,13 +730,9 @@ function dpt_admin_progress_single() {
 ?>
 
 
-<?php
-//  Current Meal Plan + Change Option
-$current_meal_plan = get_user_meta($user_id, 'meal_plan', true);
-?>
 <h2>Meal Plan</h2>
 <?php
-$current_meal_plan = get_user_meta($user_id, 'meal_plan', true);
+$current_meal_plan = dpt_get_user_meal_plan_id( $user_id );
 
 // Get published meal plans
 $plans = get_posts([
